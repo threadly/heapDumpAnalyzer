@@ -13,7 +13,6 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-
 import org.threadly.concurrent.SameThreadSubmitterExecutor;
 import org.threadly.concurrent.SubmitterExecutorInterface;
 import org.threadly.concurrent.future.FutureUtils;
@@ -41,14 +40,11 @@ public class HprofParser {
   private static final boolean VERBOSE = false;
   private static final boolean FORCE_SINGLE_THREADED_PARSE = false;
   
-  private static final InheritableThreadLocal<Integer> POINTER_SIZE;
-  
-  static {
-    POINTER_SIZE = new InheritableThreadLocal<>();
-  }
+  // TODO - this limits to only one parser pr VM
+  private static int pointerSize = -1;
   
   protected static int getPointerSize() {
-    return POINTER_SIZE.get();
+    return pointerSize;
   }
   
   private final SubmitterExecutorInterface executor;
@@ -104,7 +100,7 @@ public class HprofParser {
      *   u8 - time in millis
      */
     String format = readString(in);
-    POINTER_SIZE.set(in.readInt());
+    pointerSize = in.readInt();
     long startTime = in.readLong();
     
     currentMainParsePosition += format.getBytes().length + 1 + 12;
@@ -133,7 +129,7 @@ public class HprofParser {
       }
       System.out.println(summary.toString());
     }
-    POINTER_SIZE.set(-1);
+    pointerSize = -1;
   }
   
   private static String readString(DataInput in) throws IOException {
