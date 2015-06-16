@@ -7,7 +7,6 @@ import java.io.EOFException;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -15,6 +14,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
+import org.threadly.concurrent.SameThreadSubmitterExecutor;
 import org.threadly.concurrent.SubmitterExecutorInterface;
 import org.threadly.concurrent.future.FutureUtils;
 import org.threadly.concurrent.future.ListenableFuture;
@@ -38,7 +38,7 @@ import org.threadly.util.StringUtils;
  * @author jent - Mike Jensen
  */
 public class HprofParser {
-  private static final boolean VERBOSE = true;
+  private static final boolean VERBOSE = false;
   private static final boolean FORCE_SINGLE_THREADED_PARSE = false;
   
   private static final InheritableThreadLocal<Integer> POINTER_SIZE;
@@ -75,7 +75,11 @@ public class HprofParser {
     } else if (! hprofFile.canRead()) {
       throw new IllegalArgumentException("Can not read file: " + hprofFile);
     }
-    this.executor = executor;
+    if (VERBOSE) {  // use single thread in verbose so the out makes sense
+      this.executor = SameThreadSubmitterExecutor.instance();
+    } else {
+      this.executor = executor;
+    }
     this.hprofFile = hprofFile;
     parsingFutures = Collections.synchronizedList(new ArrayList<ListenableFuture<?>>());
     classMap = Collections.synchronizedMap(new HashMap<Long, ClassDefinition>());
@@ -317,14 +321,13 @@ public class HprofParser {
           // simple single threaded optimization, right now this is way faster
           new HeapDumpSegmentParser(getPointerSize(), recordSize, currentMainParsePosition, in).run();
         } else {
-          final RandomAccessFile raf = new RandomAccessFile(hprofFile, "r");
+          @SuppressWarnings("resource")
+          final BufferedRandomAccessFile raf = new BufferedRandomAccessFile(hprofFile, "r");
           raf.seek(currentMainParsePosition);
-          //DataInput rafIn = new DataInputStream(new BufferedInputStream(Channels.newInputStream(raf.getChannel())));
           HeapDumpSegmentParser hdsp = new HeapDumpSegmentParser(getPointerSize(), recordSize, currentMainParsePosition, raf);
           final ListenableFuture<?> future = executor.submit(hdsp);
           parsingFutures.add(future);
           future.addListener(() -> {
-            parsingFutures.remove(future);
             try {
               raf.close();
             } catch (IOException e) {
@@ -381,7 +384,7 @@ public class HprofParser {
     Iterator<Instance> it = instances.values().iterator();
     while (it.hasNext()) {
       Instance i = it.next();
-      RandomAccessFile raf = new RandomAccessFile(hprofFile, "r");
+      BufferedRandomAccessFile raf = new BufferedRandomAccessFile(hprofFile, "r");
       try {
         raf.seek(i.valuesFilePos);
   
@@ -731,7 +734,7 @@ public class HprofParser {
             synchronized (arraySummary) {
               ArraySummary ai = arraySummary.get(elemClassPointer);
               if (ai == null) {
-                ai = new ArraySummary(instanceSummary.get(elemClassPointer) + "[]");
+                ai = new ArraySummary(instanceSummary.get(elemClassPointer).className + "[]");
                 arraySummary.put(elemClassPointer, ai);
               }
               ai.addInstanceSize(objPointers.length * Type.OBJECT.getSizeInBytes());
