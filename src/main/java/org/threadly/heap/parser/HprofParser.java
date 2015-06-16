@@ -13,6 +13,8 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+
 import org.threadly.concurrent.SameThreadSubmitterExecutor;
 import org.threadly.concurrent.SubmitterExecutorInterface;
 import org.threadly.concurrent.future.FutureUtils;
@@ -38,7 +40,6 @@ import org.threadly.util.StringUtils;
  */
 public class HprofParser {
   private static final boolean VERBOSE = false;
-  private static final boolean FORCE_SINGLE_THREADED_PARSE = false;
   
   // TODO - this limits to only one parser pr VM
   private static int pointerSize = -1;
@@ -108,6 +109,16 @@ public class HprofParser {
     while (parseNextRecord()) {
       // keep parsing
     }
+
+    try {
+      FutureUtils.blockTillAllCompleteOrFirstError(parsingFutures);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return;
+    } catch (ExecutionException e) {
+      throw ExceptionUtils.makeRuntime(e.getCause());
+    }
+    parsingFutures.clear();
     
     System.out.println(StringUtils.NEW_LINE + "Done parsing file, now analyzing..." + StringUtils.NEW_LINE);
     
@@ -191,9 +202,10 @@ public class HprofParser {
         long pointer = readPointer();
         byte[] data = new byte[(int)(recordSize - getPointerSize())];
         in.readFully(data);
-        stringMap.put(pointer, new String(data).intern());
+        String str = new String(data).intern();
+        stringMap.put(pointer, str);
         if (VERBOSE) {
-          System.out.println("String: " + pointer);
+          System.out.println("String: " + pointer + " = " + str);
         }
       } break;
       
@@ -313,25 +325,20 @@ public class HprofParser {
         if (VERBOSE) {
           System.out.println("Heap dump segment");
         }
-        if (FORCE_SINGLE_THREADED_PARSE) {
-          // simple single threaded optimization, right now this is way faster
-          new HeapDumpSegmentParser(getPointerSize(), recordSize, currentMainParsePosition, in).run();
-        } else {
-          @SuppressWarnings("resource")
-          final BufferedRandomAccessFile raf = new BufferedRandomAccessFile(hprofFile, "r");
-          raf.seek(currentMainParsePosition);
-          HeapDumpSegmentParser hdsp = new HeapDumpSegmentParser(getPointerSize(), recordSize, currentMainParsePosition, raf);
-          final ListenableFuture<?> future = executor.submit(hdsp);
-          parsingFutures.add(future);
-          future.addListener(() -> {
-            try {
-              raf.close();
-            } catch (IOException e) {
-              // ignored
-            }
-          });
-          skip(recordSize, in);
-        }
+        @SuppressWarnings("resource")
+        final BufferedRandomAccessFile raf = new BufferedRandomAccessFile(hprofFile, "r");
+        raf.seek(currentMainParsePosition);
+        HeapDumpSegmentParser hdsp = new HeapDumpSegmentParser(getPointerSize(), recordSize, currentMainParsePosition, raf);
+        final ListenableFuture<?> future = executor.submit(hdsp);
+        parsingFutures.add(future);
+        future.addListener(() -> {
+          try {
+            raf.close();
+          } catch (IOException e) {
+            // ignored
+          }
+        });
+        skip(recordSize, in);
       } break;
       
       case 0x2c: {
@@ -369,13 +376,6 @@ public class HprofParser {
   }
   
   private void processInstances() throws IOException {
-    try {
-      FutureUtils.blockTillAllCompleteOrFirstError(parsingFutures);
-    } catch (Exception e) {
-      throw ExceptionUtils.makeRuntime(e);
-    }
-    parsingFutures.clear();
-
     // right now calculating the summary count is the only processing done here
     Iterator<Instance> it = instances.values().iterator();
     while (it.hasNext()) {
@@ -389,12 +389,16 @@ public class HprofParser {
         long nextClass = i.instancePointer;
         while (nextClass != 0) {
           ClassDefinition ci = classMap.get(nextClass);
+          if (ci == null) { // TODO - this should not happen, investigate
+            System.out.println("--> " + nextClass);
+          }
           nextClass = ci.superClassPointer;
           for (ClassField field: ci.fields) {
             if (field.type == Type.OBJECT) {
               long pointer = readPointer(getPointerSize(), raf);
               if (stringMap.containsKey(pointer)) {
-                System.out.println("String!");  // TODO - how to handle this
+                // TODO - I assume we want to treat strings like primitives, this log is to ensure this check works
+                System.out.println("String!");
               } else {
                 objectValues.add(pointer);
               }
@@ -440,6 +444,15 @@ public class HprofParser {
           }
         }
       }));
+    }
+    try {
+      FutureUtils.blockTillAllCompleteOrFirstError(processingFutures);
+      // TODO - in theory we should have some results to display now
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return;
+    } catch (ExecutionException e) {
+      throw ExceptionUtils.makeRuntime(e.getCause());
     }
   }
   
@@ -730,15 +743,7 @@ public class HprofParser {
             synchronized (arraySummary) {
               ArraySummary ai = arraySummary.get(elemClassPointer);
               if (ai == null) {
-                String arrayName;
-                InstanceSummary is = instanceSummary.get(elemClassPointer);
-                if (is == null) {
-                  // TODO - what is causing this case?  is it [][]?
-                  arrayName = "Unknown[]";
-                } else {
-                  arrayName = is.className + "[]";
-                }
-                ai = new ArraySummary(arrayName);
+                ai = new ArraySummary(instanceSummary.get(elemClassPointer).className + "[]");
                 arraySummary.put(elemClassPointer, ai);
               }
               ai.addInstanceSize(objPointers.length * Type.OBJECT.getSizeInBytes());
