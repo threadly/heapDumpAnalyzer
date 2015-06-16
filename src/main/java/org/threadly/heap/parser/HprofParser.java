@@ -203,9 +203,9 @@ public class HprofParser {
         int stackTraceIdentifier = in.readInt();
         long classNameStringId = readPointer();
         instanceSummary.put(classPointer, new InstanceSummary(classPointer, classMap, 
-                                                            stringMap.get(classNameStringId)));
+                                                              stringMap.get(classNameStringId)));
         if (VERBOSE) {
-          System.out.println("Load class: " + classIdentifier);
+          System.out.println("Load class: " + classIdentifier + " / " + classPointer);
         }
       } break;
       
@@ -394,7 +394,7 @@ public class HprofParser {
             if (field.type == Type.OBJECT) {
               long pointer = readPointer(getPointerSize(), raf);
               if (stringMap.containsKey(pointer)) {
-                System.out.println("String!");
+                System.out.println("String!");  // TODO - how to handle this
               } else {
                 objectValues.add(pointer);
               }
@@ -730,7 +730,15 @@ public class HprofParser {
             synchronized (arraySummary) {
               ArraySummary ai = arraySummary.get(elemClassPointer);
               if (ai == null) {
-                ai = new ArraySummary(instanceSummary.get(elemClassPointer).className + "[]");
+                String arrayName;
+                InstanceSummary is = instanceSummary.get(elemClassPointer);
+                if (is == null) {
+                  // TODO - what is causing this case?  is it [][]?
+                  arrayName = "Unknown[]";
+                } else {
+                  arrayName = is.className + "[]";
+                }
+                ai = new ArraySummary(arrayName);
                 arraySummary.put(elemClassPointer, ai);
               }
               ai.addInstanceSize(objPointers.length * Type.OBJECT.getSizeInBytes());
