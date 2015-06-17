@@ -1,11 +1,8 @@
 package org.threadly.heap.parser;
 
-import java.io.BufferedInputStream;
 import java.io.DataInput;
-import java.io.DataInputStream;
 import java.io.EOFException;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -40,6 +37,7 @@ import org.threadly.util.StringUtils;
  */
 public class HprofParser {
   private static final boolean VERBOSE = false;
+  private static final InstanceSummary unknown = new InstanceSummary(-1, new HashMap<Long, ClassDefinition>(), "Unknown");
   
   // TODO - this limits to only one parser pr VM
   private static int pointerSize = -1;
@@ -57,7 +55,7 @@ public class HprofParser {
   private final Map<Long, InstanceSummary> instanceSummary;
   private final Map<Long, ArraySummary> arraySummary;
   private final ArrayList<Instance> leafInstances;
-  private DataInput in;
+  private DataInput mainIn;
   private long currentMainParsePosition = 0;
   /**
    * Constructs a new parser for a given file.
@@ -94,15 +92,15 @@ public class HprofParser {
    */
   @SuppressWarnings("unused")
   public void parse() throws IOException {
-    in = new DataInputStream(new BufferedInputStream(new FileInputStream(hprofFile)));
+    mainIn = new BufferedRandomAccessFile(hprofFile, "r");
     /* header:
      *   [u1]* - a null-terminated String of for the name and version
      *   u4 - size of pointers
      *   u8 - time in millis
      */
-    String format = readString(in);
-    pointerSize = in.readInt();
-    long startTime = in.readLong();
+    String format = readString(mainIn);
+    pointerSize = mainIn.readInt();
+    long startTime = mainIn.readLong();
     
     currentMainParsePosition += format.getBytes().length + 1 + 12;
     
@@ -119,6 +117,10 @@ public class HprofParser {
       throw ExceptionUtils.makeRuntime(e.getCause());
     }
     parsingFutures.clear();
+    
+  }
+  
+  public void analyse() throws IOException {
     
     System.out.println(StringUtils.NEW_LINE + "Done parsing file, now analyzing..." + StringUtils.NEW_LINE);
     
@@ -161,7 +163,7 @@ public class HprofParser {
   }
 
   /**
-   * Parses the next record from the class {@link #in} input.
+   * Parses the next record from the class {@link #mainIn} input.
    * 
    * @return true if there are no more records to parse
    */
@@ -175,13 +177,13 @@ public class HprofParser {
     
     byte tag;
     try {
-      tag = in.readByte();
+      tag = mainIn.readByte();
     } catch (EOFException e) {
       // only EOF that would indicate a done, otherwise a partial file was provided
       return false;
     }
-    long time = in.readInt();
-    long recordSize = Integer.toUnsignedLong(in.readInt());
+    long time = mainIn.readInt();
+    long recordSize = Integer.toUnsignedLong(mainIn.readInt());
     currentMainParsePosition += 9;
     if (VERBOSE) {
       System.out.println("Record...Time: " + time + ", size: " + recordSize);
@@ -193,7 +195,7 @@ public class HprofParser {
   }
   
   /**
-   * Parses the body for the next record from {@link #in} input.
+   * Parses the body for the next record from {@link #mainIn} input.
    */
   @SuppressWarnings("unused")
   private void parseNextRecordBody(long recordSize, byte tag) throws IOException {
@@ -201,7 +203,7 @@ public class HprofParser {
       case 0x1: {
         long pointer = readPointer();
         byte[] data = new byte[(int)(recordSize - getPointerSize())];
-        in.readFully(data);
+        mainIn.readFully(data);
         String str = new String(data).intern();
         stringMap.put(pointer, str);
         if (VERBOSE) {
@@ -210,9 +212,9 @@ public class HprofParser {
       } break;
       
       case 0x2: {
-        int classIdentifier = in.readInt();
+        int classIdentifier = mainIn.readInt();
         long classPointer = readPointer();
-        int stackTraceIdentifier = in.readInt();
+        int stackTraceIdentifier = mainIn.readInt();
         long classNameStringId = readPointer();
         instanceSummary.put(classPointer, new InstanceSummary(classPointer, classMap, 
                                                               stringMap.get(classNameStringId)));
@@ -222,7 +224,7 @@ public class HprofParser {
       } break;
       
       case 0x3: {
-        int classIdentifier = in.readInt();
+        int classIdentifier = mainIn.readInt();
         if (VERBOSE) {
           System.out.println("Unload class: " + classIdentifier);
         }
@@ -234,8 +236,8 @@ public class HprofParser {
         long methodNameStringId = readPointer();
         long methodSigStringId = readPointer();
         long sourceFileNameStringId = readPointer();
-        int classIdentifier = in.readInt();
-        int location = in.readInt();
+        int classIdentifier = mainIn.readInt();
+        int location = mainIn.readInt();
         if (VERBOSE) {
           System.out.println("Stack frame: " + stackFrameId);
         }
@@ -243,9 +245,9 @@ public class HprofParser {
       } break;
       
       case 0x5: {
-        int stackTraceIdentifier = in.readInt();
-        int threadIdentifier = in.readInt();
-        int numFrames = in.readInt();
+        int stackTraceIdentifier = mainIn.readInt();
+        int threadIdentifier = mainIn.readInt();
+        int numFrames = mainIn.readInt();
         long[] stackPointers = new long[(int)((recordSize - 12) / getPointerSize())];
         for (int i = 0; i < stackPointers.length; i++) {
           stackPointers[i] = readPointer();
@@ -257,22 +259,22 @@ public class HprofParser {
       } break;
       
       case 0x6: {
-        short bitMaskFlags = in.readShort();
-        float cutoffRatio = in.readFloat();
-        int totalLiveBytes = in.readInt();
-        int totalLiveInstances = in.readInt();
-        long totalBytesAllocated = in.readLong();
-        long totalInstancesAllocated = in.readLong();
+        short bitMaskFlags = mainIn.readShort();
+        float cutoffRatio = mainIn.readFloat();
+        int totalLiveBytes = mainIn.readInt();
+        int totalLiveInstances = mainIn.readInt();
+        long totalBytesAllocated = mainIn.readLong();
+        long totalInstancesAllocated = mainIn.readLong();
         
-        int allocSiteCount = in.readInt();
+        int allocSiteCount = mainIn.readInt();
         for (int i = 0; i < allocSiteCount; i++) {
-          byte arrayIndicator = in.readByte();
-          int classIdentifier = in.readInt();
-          int stackTraceIdentifier = in.readInt();
-          int numLiveBytes = in.readInt();
-          int numLiveInstances = in.readInt();
-          int numBytesAllocated = in.readInt();
-          int numInstancesAllocated = in.readInt();
+          byte arrayIndicator = mainIn.readByte();
+          int classIdentifier = mainIn.readInt();
+          int stackTraceIdentifier = mainIn.readInt();
+          int numLiveBytes = mainIn.readInt();
+          int numLiveInstances = mainIn.readInt();
+          int numBytesAllocated = mainIn.readInt();
+          int numInstancesAllocated = mainIn.readInt();
         }
         if (VERBOSE) {
           System.out.println("Alloc site");
@@ -281,10 +283,10 @@ public class HprofParser {
       } break;
       
       case 0x7: {
-        int totalLiveBytes = in.readInt();
-        int totalLiveInstances = in.readInt();
-        long totalBytesAllocated = in.readLong();
-        long totalInstancesAllocated = in.readLong();
+        int totalLiveBytes = mainIn.readInt();
+        int totalLiveInstances = mainIn.readInt();
+        long totalBytesAllocated = mainIn.readLong();
+        long totalInstancesAllocated = mainIn.readLong();
         if (VERBOSE) {
           System.out.println("Heap summary...Total live bytes: " + totalLiveBytes + 
                                ", Total bytes allocated: " + totalBytesAllocated +
@@ -295,9 +297,9 @@ public class HprofParser {
       } break;
       
       case 0xa: {
-        int threadIdentifier = in.readInt();
+        int threadIdentifier = mainIn.readInt();
         long threadObjectId = readPointer();
-        int stackTraceIdentifier = in.readInt();
+        int stackTraceIdentifier = mainIn.readInt();
         long threadNameStringId = readPointer();
         long threadGroupNameId = readPointer();
         long threadParentGroupNameId = readPointer();
@@ -308,7 +310,7 @@ public class HprofParser {
       } break;
       
       case 0xb: {
-        int threadIdentifier = in.readInt();
+        int threadIdentifier = mainIn.readInt();
         if (VERBOSE) {
           System.out.println("End thread: " + threadIdentifier);
         }
@@ -318,7 +320,7 @@ public class HprofParser {
         if (VERBOSE) {
           System.out.println("Heap dump");
         }
-        new HeapDumpSegmentParser(getPointerSize(), recordSize, currentMainParsePosition, in).run();
+        new HeapDumpSegmentParser(getPointerSize(), recordSize, currentMainParsePosition, mainIn).run();
       } break;
       
       case 0x1c: {
@@ -338,7 +340,7 @@ public class HprofParser {
             // ignored
           }
         });
-        skip(recordSize, in);
+        skip(recordSize, mainIn);
       } break;
       
       case 0x2c: {
@@ -348,12 +350,12 @@ public class HprofParser {
       } break;
       
       case 0xd: {
-        int totalNumOfSamples = in.readInt();
+        int totalNumOfSamples = mainIn.readInt();
         
-        int cpuSampleCount = in.readInt();
+        int cpuSampleCount = mainIn.readInt();
         for (int i = 0; i < cpuSampleCount; i++) {
-          int numSamples = in.readInt();
-          int stackTraceIdentifier = in.readInt();
+          int numSamples = mainIn.readInt();
+          int stackTraceIdentifier = mainIn.readInt();
         }
         // cpu samples currently ignored
         if (VERBOSE) {
@@ -362,8 +364,8 @@ public class HprofParser {
       } break;
       
       case 0xe: {
-        int bitMaskFlags = in.readInt();
-        short stackTraceDepth = in.readShort();
+        int bitMaskFlags = mainIn.readInt();
+        short stackTraceDepth = mainIn.readShort();
         // control settings currently ignored
         if (VERBOSE) {
           System.out.println("Control settings");
@@ -389,23 +391,24 @@ public class HprofParser {
         long nextClass = i.instancePointer;
         while (nextClass != 0) {
           ClassDefinition ci = classMap.get(nextClass);
-          if (ci == null) { // TODO - this should not happen, investigate
-            System.out.println("--> " + nextClass);
-          }
-          nextClass = ci.superClassPointer;
-          for (ClassField field: ci.fields) {
-            if (field.type == Type.OBJECT) {
-              long pointer = readPointer(getPointerSize(), raf);
-              if (stringMap.containsKey(pointer)) {
-                // TODO - I assume we want to treat strings like primitives, this log is to ensure this check works
-                System.out.println("String!");
+          if (ci != null) { // TODO - this should not happen, investigate
+            nextClass = ci.superClassPointer;
+            for (ClassField field: ci.fields) {
+              if (field.type == Type.OBJECT) {
+                long pointer = readPointer(getPointerSize(), raf);
+                if (stringMap.containsKey(pointer)) {
+                  // TODO - I assume we want to treat strings like primitives, this log is to ensure this check works
+                  System.out.println("String!");
+                } else {
+                  objectValues.add(pointer);
+                }
               } else {
-                objectValues.add(pointer);
+                // discard data
+                skip(field.type.getSizeInBytes(), raf);
               }
-            } else {
-              // discard data
-              skip(field.type.getSizeInBytes(), raf);
             }
+          } else {
+            nextClass = 0;
           }
         }
         if (objectValues.isEmpty()) {
@@ -468,7 +471,7 @@ public class HprofParser {
   }
   
   private long readPointer() throws IOException {
-    return readPointer(getPointerSize(), in);
+    return readPointer(getPointerSize(), mainIn);
   }
   
   private static long readPointer(int pointerSize, DataInput in) throws IOException {
@@ -533,6 +536,55 @@ public class HprofParser {
       default:
         throw new UnsupportedOperationException();
     }
+  }
+  
+  private static Value<?>[] readValueArray(DataInput in, int size, Type type) throws IOException {
+    Value<?>[] va = new Value<?>[size];
+    switch (type) {
+      case OBJECT:
+        for(int i=0; i<size; i++) {
+          va[i] = new Value<>(type, readPointer(getPointerSize(), in));
+        } break;
+      case CHAR:
+        for(int i=0; i<size; i++) {
+          va[i] = new Value<>(type, in.readChar());
+        } break;
+      case LONG:
+        for(int i=0; i<size; i++) {
+          va[i] = new Value<>(type, in.readLong());
+        } break;
+      case INT:
+        for(int i=0; i<size; i++) {
+          va[i] = new Value<>(type, in.readInt());
+        } break;
+      case SHORT:
+        for(int i=0; i<size; i++) {
+          va[i] = new Value<>(type, in.readShort());
+        } break;
+      case BOOL:
+        for(int i=0; i<size; i++) {
+          if (in.readBoolean()) {
+            va[i] = new Value<>(type, Boolean.TRUE);
+          } else {
+            va[i] = new Value<>(type, Boolean.FALSE);
+          }
+        } break;
+      case BYTE:
+        for(int i=0; i<size; i++) {
+          va[i] = new Value<>(type, in.readByte());
+        } break;
+      case DOUBLE:
+        for(int i=0; i<size; i++) {
+          va[i] = new Value<>(type, in.readDouble());
+        } break;
+      case FLOAT:
+        for(int i=0; i<size; i++) {
+          va[i] = new Value<>(type, in.readFloat());
+        } break;
+      default:
+        throw new UnsupportedOperationException();
+    }
+    return va;
   }
   
   private class HeapDumpSegmentParser implements Runnable {
@@ -743,7 +795,13 @@ public class HprofParser {
             synchronized (arraySummary) {
               ArraySummary ai = arraySummary.get(elemClassPointer);
               if (ai == null) {
-                ai = new ArraySummary(instanceSummary.get(elemClassPointer).className + "[]");
+                InstanceSummary tmp = instanceSummary.get(elemClassPointer);
+                if (tmp == null) {
+                  ai = new ArraySummary(unknown.className+"[]");
+                  System.out.println("unknown class array:"+arrayPointer+":"+elemClassPointer);
+                } else {
+                  ai = new ArraySummary(tmp.className + "[]");
+                }
                 arraySummary.put(elemClassPointer, ai);
               }
               ai.addInstanceSize(objPointers.length * Type.OBJECT.getSizeInBytes());
@@ -756,14 +814,13 @@ public class HprofParser {
           case 0x23: {
             long arrayPointer = readPointer();
             int stackTraceIdentifier = in.readInt();
-            Value<?>[] elements = new Value<?>[in.readInt()];
+            int arraySize = in.readInt();
+            Value<?>[] elements;
             Type type = getType(in.readByte());
             bytesLeft -= pointerSize + 9;
-            
-            for (int i = 0; i < elements.length; i++) {
-              elements[i] = readValue(in, type);
-              bytesLeft -= type.getSizeInBytes();
-            }
+
+            elements = readValueArray(in, arraySize, type);
+            bytesLeft -= type.getSizeInBytes()*arraySize;
             
             // TODO - improve thread access
             synchronized (arraySummary) {
