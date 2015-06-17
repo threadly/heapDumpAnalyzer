@@ -7,13 +7,13 @@ import java.io.EOFException;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
 
 import org.threadly.concurrent.SameThreadSubmitterExecutor;
 import org.threadly.concurrent.SubmitterExecutorInterface;
@@ -29,6 +29,7 @@ import org.threadly.heap.parser.DataStructures.Type;
 import org.threadly.heap.parser.DataStructures.Value;
 import org.threadly.util.ArgumentVerifier;
 import org.threadly.util.ExceptionUtils;
+import org.threadly.util.StringUtils;
 
 /**
  * <p>This class parses a binary format hprof heap dump file.  These files can be generated using 
@@ -39,26 +40,23 @@ import org.threadly.util.ExceptionUtils;
  */
 public class HprofParser {
   private static final boolean VERBOSE = false;
-  private static final boolean FORCE_SINGLE_THREADED = true;
   
-  private static final InheritableThreadLocal<Integer> POINTER_SIZE;
-  
-  static {
-    POINTER_SIZE = new InheritableThreadLocal<>();
-  }
+  // TODO - this limits to only one parser pr VM
+  private static int pointerSize = -1;
   
   protected static int getPointerSize() {
-    return POINTER_SIZE.get();
+    return pointerSize;
   }
   
   private final SubmitterExecutorInterface executor;
   private final File hprofFile;
   private final List<ListenableFuture<?>> parsingFutures;
   private final Map<Long, ClassDefinition> classMap;
-  private final List<Instance> instances;
+  private final Map<Long, Instance> instances;
   private final Map<Long, String> stringMap;
   private final Map<Long, InstanceSummary> instanceSummary;
   private final Map<Long, ArraySummary> arraySummary;
+  private final ArrayList<Instance> leafInstances;
   private DataInput in;
   private long currentMainParsePosition = 0;
   /**
@@ -74,7 +72,7 @@ public class HprofParser {
     } else if (! hprofFile.canRead()) {
       throw new IllegalArgumentException("Can not read file: " + hprofFile);
     }
-    if (FORCE_SINGLE_THREADED) {
+    if (VERBOSE) {  // use single thread in verbose so the out makes sense
       this.executor = SameThreadSubmitterExecutor.instance();
     } else {
       this.executor = executor;
@@ -82,10 +80,11 @@ public class HprofParser {
     this.hprofFile = hprofFile;
     parsingFutures = Collections.synchronizedList(new ArrayList<ListenableFuture<?>>());
     classMap = Collections.synchronizedMap(new HashMap<Long, ClassDefinition>());
-    instances = Collections.synchronizedList(new ArrayList<Instance>());
+    instances = Collections.synchronizedMap(new HashMap<Long, Instance>());
     stringMap = new HashMap<>();
     instanceSummary = new HashMap<>();
     arraySummary = new HashMap<>();
+    leafInstances = new ArrayList<>();
   }
   
   /**
@@ -102,7 +101,7 @@ public class HprofParser {
      *   u8 - time in millis
      */
     String format = readString(in);
-    POINTER_SIZE.set(in.readInt());
+    pointerSize = in.readInt();
     long startTime = in.readLong();
     
     currentMainParsePosition += format.getBytes().length + 1 + 12;
@@ -110,6 +109,21 @@ public class HprofParser {
     while (parseNextRecord()) {
       // keep parsing
     }
+
+    try {
+      FutureUtils.blockTillAllCompleteOrFirstError(parsingFutures);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return;
+    } catch (ExecutionException e) {
+      throw ExceptionUtils.makeRuntime(e.getCause());
+    }
+    parsingFutures.clear();
+    
+    System.out.println(StringUtils.NEW_LINE + "Done parsing file, now analyzing..." + StringUtils.NEW_LINE);
+    
+    // parsing done
+    processInstances();
     
     List<Summary> summaryList = new ArrayList<>();
     summaryList.addAll(instanceSummary.values());
@@ -126,7 +140,7 @@ public class HprofParser {
       }
       System.out.println(summary.toString());
     }
-    POINTER_SIZE.set(-1);
+    pointerSize = -1;
   }
   
   private static String readString(DataInput in) throws IOException {
@@ -188,9 +202,10 @@ public class HprofParser {
         long pointer = readPointer();
         byte[] data = new byte[(int)(recordSize - getPointerSize())];
         in.readFully(data);
-        stringMap.put(pointer, new String(data).intern());
+        String str = new String(data).intern();
+        stringMap.put(pointer, str);
         if (VERBOSE) {
-          System.out.println("String: " + pointer);
+          System.out.println("String: " + pointer + " = " + str);
         }
       } break;
       
@@ -200,9 +215,9 @@ public class HprofParser {
         int stackTraceIdentifier = in.readInt();
         long classNameStringId = readPointer();
         instanceSummary.put(classPointer, new InstanceSummary(classPointer, classMap, 
-                                                            stringMap.get(classNameStringId)));
+                                                              stringMap.get(classNameStringId)));
         if (VERBOSE) {
-          System.out.println("Load class: " + classIdentifier);
+          System.out.println("Load class: " + classIdentifier + " / " + classPointer);
         }
       } break;
       
@@ -303,48 +318,33 @@ public class HprofParser {
         if (VERBOSE) {
           System.out.println("Heap dump");
         }
-        new HeapDumpSegmentParser(getPointerSize(), recordSize, in).run();
-        processInstances();
+        new HeapDumpSegmentParser(getPointerSize(), recordSize, currentMainParsePosition, in).run();
       } break;
       
       case 0x1c: {
         if (VERBOSE) {
           System.out.println("Heap dump segment");
         }
-        if (FORCE_SINGLE_THREADED) {
-          // simple single threaded optimization, right now this is way faster
-          new HeapDumpSegmentParser(getPointerSize(), recordSize, in).run();
-        } else {
-          final RandomAccessFile raf = new RandomAccessFile(hprofFile, "r");
-          raf.seek(currentMainParsePosition);
-          HeapDumpSegmentParser hdsp = new HeapDumpSegmentParser(getPointerSize(), recordSize, raf);
-          final ListenableFuture<?> future = executor.submit(hdsp);
-          parsingFutures.add(future);
-          future.addListener(() -> {
-            parsingFutures.remove(future);
-            try {
-              raf.close();
-            } catch (IOException e) {
-              // ignored
-            }
-          });
-          long skipRemaining = recordSize;
-          while (skipRemaining > 0) {
-            int toSkipCount =  (int)Math.min(skipRemaining, 1024 * 1024 * 1024);
-            int skippedAmount = in.skipBytes(toSkipCount);
-            if (skippedAmount == 0) {
-              throw new IllegalStateException("File not advancing");
-            }
-            skipRemaining -= skippedAmount;
+        @SuppressWarnings("resource")
+        final BufferedRandomAccessFile raf = new BufferedRandomAccessFile(hprofFile, "r");
+        raf.seek(currentMainParsePosition);
+        HeapDumpSegmentParser hdsp = new HeapDumpSegmentParser(getPointerSize(), recordSize, currentMainParsePosition, raf);
+        final ListenableFuture<?> future = executor.submit(hdsp);
+        parsingFutures.add(future);
+        future.addListener(() -> {
+          try {
+            raf.close();
+          } catch (IOException e) {
+            // ignored
           }
-        }
+        });
+        skip(recordSize, in);
       } break;
       
       case 0x2c: {
         if (VERBOSE) {
           System.out.println("Heap dump segment end");
         }
-        processInstances();
       } break;
       
       case 0xd: {
@@ -375,20 +375,96 @@ public class HprofParser {
     }
   }
   
-  private void processInstances() {
-    try {
-      FutureUtils.blockTillAllCompleteOrFirstError(parsingFutures);
-    } catch (Exception e) {
-      throw ExceptionUtils.makeRuntime(e);
-    }
-    parsingFutures.clear();
-
+  private void processInstances() throws IOException {
     // right now calculating the summary count is the only processing done here
-    Iterator<Instance> it = instances.iterator();
+    Iterator<Instance> it = instances.values().iterator();
     while (it.hasNext()) {
-      instanceSummary.get(it.next().classDef.classPointer).incrementInstanceCount();
+      Instance i = it.next();
+      BufferedRandomAccessFile raf = new BufferedRandomAccessFile(hprofFile, "r");
+      try {
+        raf.seek(i.valuesFilePos);
+  
+        ArrayList<Long> objectValues = new ArrayList<>();
+        // superclass of Object has a pointer of 0
+        long nextClass = i.instancePointer;
+        while (nextClass != 0) {
+          ClassDefinition ci = classMap.get(nextClass);
+          if (ci == null) { // TODO - this should not happen, investigate
+            System.out.println("--> " + nextClass);
+          }
+          nextClass = ci.superClassPointer;
+          for (ClassField field: ci.fields) {
+            if (field.type == Type.OBJECT) {
+              long pointer = readPointer(getPointerSize(), raf);
+              if (stringMap.containsKey(pointer)) {
+                // TODO - I assume we want to treat strings like primitives, this log is to ensure this check works
+                System.out.println("String!");
+              } else {
+                objectValues.add(pointer);
+              }
+            } else {
+              // discard data
+              skip(field.type.getSizeInBytes(), raf);
+            }
+          }
+        }
+        if (objectValues.isEmpty()) {
+          leafInstances.add(i);
+          // TODO - track as a leaf node to start retention traversal from
+        } else {
+          Iterator<Long> childReferences = objectValues.iterator();
+          while (childReferences.hasNext()) {
+            instances.get(childReferences.next()).addParent(i);
+          }
+        }
+        instanceSummary.get(i.classDef.classPointer).incrementInstanceCount();
+      } finally {
+        raf.close();
+      }
     }
+    // we can clear instances now since we will traverse from the leaf instances
     instances.clear();
+    leafInstances.trimToSize();
+    
+    List<ListenableFuture<?>> processingFutures = new ArrayList<>(leafInstances.size());
+    it  = leafInstances.iterator();
+    while (it.hasNext()) {
+      Instance leaf = it.next();
+      processingFutures.add(executor.submit(new Runnable() {
+        @Override
+        public void run() {
+          traverseParents(leaf, 0);
+        }
+        
+        private void traverseParents(Instance start, int retainedSize) {
+          retainedSize += start.valuesLength;
+          for (Instance p : leaf.getParentInstances()) {
+            // TODO - how do we avoid traversing a parent which is reached from multiple leafs?
+            traverseParents(p, retainedSize);
+          }
+        }
+      }));
+    }
+    try {
+      FutureUtils.blockTillAllCompleteOrFirstError(processingFutures);
+      // TODO - in theory we should have some results to display now
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return;
+    } catch (ExecutionException e) {
+      throw ExceptionUtils.makeRuntime(e.getCause());
+    }
+  }
+  
+  private static void skip(long recordSize, DataInput in) throws IOException {
+    while (recordSize > 0) {
+      int toSkipCount = (int)Math.min(recordSize, 1024 * 1024 * 1024);
+      int skippedAmount = in.skipBytes(toSkipCount);
+      if (skippedAmount == 0) {
+        throw new IllegalStateException("Not advancing");
+      }
+      recordSize -= skippedAmount;
+    }
   }
   
   private long readPointer() throws IOException {
@@ -462,12 +538,14 @@ public class HprofParser {
   private class HeapDumpSegmentParser implements Runnable {
     private final int pointerSize;
     private final DataInput in;
+    private long loopStartFilePos;
     private long bytesLeft;
     
-    public HeapDumpSegmentParser(int pointerSize, long recordSize, DataInput in) {
+    public HeapDumpSegmentParser(int pointerSize, long recordSize, long startingFilePos, DataInput in) {
       this.pointerSize = pointerSize;
       this.in = in;
       this.bytesLeft = recordSize;
+      this.loopStartFilePos = startingFilePos;
     }
     
     private long readPointer() throws IOException {
@@ -486,6 +564,7 @@ public class HprofParser {
     @SuppressWarnings("unused")
     private void doParse() throws IOException {
       while (bytesLeft > 0) {
+        final long bytesLeftAtStart = bytesLeft;
         if (VERBOSE) {
           System.out.println("Remaining bytes in dump: " + bytesLeft);
         }
@@ -638,12 +717,13 @@ public class HprofParser {
             long instancePointer = readPointer();
             int stackTraceIdentifier = in.readInt();
             long classPointer = readPointer();
-            byte[] data = new byte[in.readInt()];
-            in.readFully(data);
-            bytesLeft -= (pointerSize * 2) + 8 + data.length;
+            int valuesLength = in.readInt();
+            skip(valuesLength, in);
+            bytesLeft -= (pointerSize * 2) + 8 + valuesLength;
             
             // TODO - improve thread access
-            instances.add(new Instance(instancePointer, classMap.get(classPointer), data));
+            instances.put(instancePointer, new Instance(instancePointer, classMap.get(classPointer), 
+                                                        loopStartFilePos + (pointerSize * 2) + 8, valuesLength));
             if (VERBOSE) {
               System.out.println("Instance dump: " + instancePointer);
             }
@@ -663,7 +743,7 @@ public class HprofParser {
             synchronized (arraySummary) {
               ArraySummary ai = arraySummary.get(elemClassPointer);
               if (ai == null) {
-                ai = new ArraySummary(instanceSummary.get(elemClassPointer) + "[]");
+                ai = new ArraySummary(instanceSummary.get(elemClassPointer).className + "[]");
                 arraySummary.put(elemClassPointer, ai);
               }
               ai.addInstanceSize(objPointers.length * Type.OBJECT.getSizeInBytes());
@@ -702,6 +782,8 @@ public class HprofParser {
           default:
             throw new UnsupportedOperationException("Unsupported heap dump sub-record type: " + heapDumpTag);
         }
+        
+        loopStartFilePos += (bytesLeftAtStart - bytesLeft);
       }
     }
   }

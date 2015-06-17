@@ -1,5 +1,6 @@
 package org.threadly.heap.parser;
 
+import java.util.Arrays;
 import java.util.Map;
 
 import org.threadly.util.ArgumentVerifier;
@@ -100,13 +101,36 @@ public abstract class DataStructures {
   public static class Instance {
     public final long instancePointer;
     public final ClassDefinition classDef;
-    public final byte[] packedValues;
+    public final long valuesFilePos;
+    public final int valuesLength;
+    private Instance[] parentReferences;
     
     public Instance(long instancePointer, 
-                    ClassDefinition classDef, byte[] packedValues) {
+                    ClassDefinition classDef, long valuesFilePos, int valuesLength) {
       this.instancePointer = instancePointer;
       this.classDef = classDef;
-      this.packedValues = packedValues;
+      this.valuesFilePos = valuesFilePos;
+      this.valuesLength = valuesLength;
+      parentReferences = new Instance[0];
+    }
+
+    public void addParent(Instance parent) {
+      if (Arrays.stream(parentReferences).anyMatch(p -> {
+        return p.equals(parent);
+      })) {
+        // don't add parent references if we already have one for this parent
+        return;
+      }
+      
+      // painful, but done to be memory conscious
+      Instance[] newParentArray = new Instance[parentReferences.length + 1];
+      System.arraycopy(parentReferences, 0, newParentArray, 0, parentReferences.length);
+      newParentArray[parentReferences.length] = parent;
+      parentReferences = newParentArray;
+    }
+    
+    public Instance[] getParentInstances() {
+      return parentReferences;
     }
   }
   

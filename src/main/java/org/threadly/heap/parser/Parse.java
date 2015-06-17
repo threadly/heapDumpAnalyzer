@@ -8,6 +8,7 @@ import java.io.IOException;
 
 import org.threadly.concurrent.PriorityScheduler;
 
+@SuppressWarnings("javadoc")
 public class Parse {
   public static void main(String[] args) throws IOException {
     if (args.length < 1) {
