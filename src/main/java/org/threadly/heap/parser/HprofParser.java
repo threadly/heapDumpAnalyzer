@@ -320,20 +320,7 @@ public class HprofParser {
         if (VERBOSE) {
           System.out.println("Heap dump");
         }
-        //new HeapDumpSegmentParser(getPointerSize(), recordSize, currentMainParsePosition, mainIn).run();
-        final BufferedRandomAccessFile raf = new BufferedRandomAccessFile(hprofFile, "r");
-        raf.seek(currentMainParsePosition);
-        HeapDumpSegmentParser hdsp = new HeapDumpSegmentParser(getPointerSize(), recordSize, currentMainParsePosition, raf);
-        final ListenableFuture<?> future = executor.submit(hdsp);
-        parsingFutures.add(future);
-        future.addListener(() -> {
-          try {
-            raf.close();
-          } catch (IOException e) {
-            // ignored
-          }
-        });
-        skip(recordSize, mainIn);
+        new HeapDumpSegmentParser(getPointerSize(), recordSize, currentMainParsePosition, mainIn).run();
       } break;
       
       case 0x1c: {
