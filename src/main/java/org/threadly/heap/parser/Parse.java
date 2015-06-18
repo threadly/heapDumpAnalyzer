@@ -28,7 +28,7 @@ public class Parse {
       System.out.println("ParseTime:"+(Clock.accurateForwardProgressingMillis()-start));
       System.out.println("---------------------");
       long at = Clock.accurateForwardProgressingMillis();
-      parser.analyse();
+      parser.analyze();
       System.out.println("---------------------");
       System.out.println("AnalyseTime:"+(Clock.accurateForwardProgressingMillis()-at));
     } finally {

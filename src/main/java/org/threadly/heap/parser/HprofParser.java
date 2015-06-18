@@ -37,9 +37,9 @@ import org.threadly.util.StringUtils;
  */
 public class HprofParser {
   private static final boolean VERBOSE = false;
-  private static final InstanceSummary unknown = new InstanceSummary(-1, new HashMap<Long, ClassDefinition>(), "Unknown");
+  private static final InstanceSummary UNKNOWN_CLASS = new InstanceSummary(-1, new HashMap<Long, ClassDefinition>(), "Unknown");
   
-  // TODO - this limits to only one parser pr VM
+  // TODO - this limits to only one parser per VM
   private static int pointerSize = -1;
   
   protected static int getPointerSize() {
@@ -117,15 +117,12 @@ public class HprofParser {
       throw ExceptionUtils.makeRuntime(e.getCause());
     }
     parsingFutures.clear();
-    
   }
   
-  public void analyse() throws IOException {
-    
+  public void analyze() throws IOException {
     System.out.println(StringUtils.NEW_LINE + "Done parsing file, now analyzing..." + StringUtils.NEW_LINE);
     
-    // parsing done
-    processInstances();
+    analyzeInstances();
     
     List<Summary> summaryList = new ArrayList<>();
     summaryList.addAll(instanceSummary.values());
@@ -143,6 +140,88 @@ public class HprofParser {
       System.out.println(summary.toString());
     }
     pointerSize = -1;
+  }
+  
+  private void analyzeInstances() throws IOException {
+    // right now calculating the summary count is the only processing done here
+    Iterator<Instance> it = instances.values().iterator();
+    while (it.hasNext()) {
+      Instance i = it.next();
+      BufferedRandomAccessFile raf = new BufferedRandomAccessFile(hprofFile, "r");
+      try {
+        raf.seek(i.valuesFilePos);
+  
+        ArrayList<Long> objectValues = new ArrayList<>();
+        // superclass of Object has a pointer of 0
+        long nextClass = i.instancePointer;
+        while (nextClass != 0) {
+          ClassDefinition ci = classMap.get(nextClass);
+          if (ci != null) { // TODO - this should not happen, investigate
+            nextClass = ci.superClassPointer;
+            for (ClassField field: ci.fields) {
+              if (field.type == Type.OBJECT) {
+                objectValues.add(readPointer(getPointerSize(), raf));
+              } else {
+                // discard data
+                skip(raf, field.type.getSizeInBytes());
+              }
+            }
+          } else {
+            nextClass = 0;
+          }
+        }
+        if (objectValues.isEmpty()) {
+          leafInstances.add(i);
+        } else {
+          Iterator<Long> childReferences = objectValues.iterator();
+          while (childReferences.hasNext()) {
+            instances.get(childReferences.next()).addParent(i);
+          }
+        }
+        instanceSummary.get(i.classDef.classPointer).incrementInstanceCount();
+      } finally {
+        raf.close();
+      }
+    }
+    // we can clear instances now since we will traverse from the leaf instances
+    instances.clear();
+    leafInstances.trimToSize();
+    
+    System.out.println("Leafs to start analysis from: " + leafInstances.size());
+    List<ListenableFuture<?>> processingFutures = new ArrayList<>(leafInstances.size());
+    it  = leafInstances.iterator();
+    while (it.hasNext()) {
+      Instance leaf = it.next();
+      processingFutures.add(executor.submit(new Runnable() {
+        @Override
+        public void run() {
+          traverseParents(leaf, 0);
+        }
+        
+        private void traverseParents(Instance start, int retainedSize) {
+          retainedSize += start.valuesLength;
+          for (Instance p : leaf.getParentInstances()) {
+            if (! p.traversed()) {
+              System.out.println("Traversing: " + p.instancePointer + " - " + retainedSize);
+              p.trackRetainedSize(retainedSize);
+              instanceSummary.get(p.classDef.classPointer).incrementRetained(retainedSize);
+              traverseParents(p, retainedSize);
+            } else {
+              System.out.println("alread traversed: " + p.instancePointer);
+            }
+          }
+        }
+      }));
+    }
+    try {
+      FutureUtils.blockTillAllCompleteOrFirstError(processingFutures);
+      // TODO - in theory we should have some results to display now
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return;
+    } catch (ExecutionException e) {
+      throw ExceptionUtils.makeRuntime(e.getCause());
+    }
   }
   
   private static String readString(DataInput in) throws IOException {
@@ -340,7 +419,7 @@ public class HprofParser {
             // ignored
           }
         });
-        skip(recordSize, mainIn);
+        skip(mainIn, recordSize);
       } break;
       
       case 0x2c: {
@@ -377,89 +456,7 @@ public class HprofParser {
     }
   }
   
-  private void processInstances() throws IOException {
-    // right now calculating the summary count is the only processing done here
-    Iterator<Instance> it = instances.values().iterator();
-    while (it.hasNext()) {
-      Instance i = it.next();
-      BufferedRandomAccessFile raf = new BufferedRandomAccessFile(hprofFile, "r");
-      try {
-        raf.seek(i.valuesFilePos);
-  
-        ArrayList<Long> objectValues = new ArrayList<>();
-        // superclass of Object has a pointer of 0
-        long nextClass = i.instancePointer;
-        while (nextClass != 0) {
-          ClassDefinition ci = classMap.get(nextClass);
-          if (ci != null) { // TODO - this should not happen, investigate
-            nextClass = ci.superClassPointer;
-            for (ClassField field: ci.fields) {
-              if (field.type == Type.OBJECT) {
-                long pointer = readPointer(getPointerSize(), raf);
-                if (stringMap.containsKey(pointer)) {
-                  // TODO - I assume we want to treat strings like primitives, this log is to ensure this check works
-                  System.out.println("String!");
-                } else {
-                  objectValues.add(pointer);
-                }
-              } else {
-                // discard data
-                skip(field.type.getSizeInBytes(), raf);
-              }
-            }
-          } else {
-            nextClass = 0;
-          }
-        }
-        if (objectValues.isEmpty()) {
-          leafInstances.add(i);
-          // TODO - track as a leaf node to start retention traversal from
-        } else {
-          Iterator<Long> childReferences = objectValues.iterator();
-          while (childReferences.hasNext()) {
-            instances.get(childReferences.next()).addParent(i);
-          }
-        }
-        instanceSummary.get(i.classDef.classPointer).incrementInstanceCount();
-      } finally {
-        raf.close();
-      }
-    }
-    // we can clear instances now since we will traverse from the leaf instances
-    instances.clear();
-    leafInstances.trimToSize();
-    
-    List<ListenableFuture<?>> processingFutures = new ArrayList<>(leafInstances.size());
-    it  = leafInstances.iterator();
-    while (it.hasNext()) {
-      Instance leaf = it.next();
-      processingFutures.add(executor.submit(new Runnable() {
-        @Override
-        public void run() {
-          traverseParents(leaf, 0);
-        }
-        
-        private void traverseParents(Instance start, int retainedSize) {
-          retainedSize += start.valuesLength;
-          for (Instance p : leaf.getParentInstances()) {
-            // TODO - how do we avoid traversing a parent which is reached from multiple leafs?
-            traverseParents(p, retainedSize);
-          }
-        }
-      }));
-    }
-    try {
-      FutureUtils.blockTillAllCompleteOrFirstError(processingFutures);
-      // TODO - in theory we should have some results to display now
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      return;
-    } catch (ExecutionException e) {
-      throw ExceptionUtils.makeRuntime(e.getCause());
-    }
-  }
-  
-  private static void skip(long recordSize, DataInput in) throws IOException {
+  private static void skip(DataInput in, long recordSize) throws IOException {
     while (recordSize > 0) {
       int toSkipCount = (int)Math.min(recordSize, 1024 * 1024 * 1024);
       int skippedAmount = in.skipBytes(toSkipCount);
@@ -770,7 +767,7 @@ public class HprofParser {
             int stackTraceIdentifier = in.readInt();
             long classPointer = readPointer();
             int valuesLength = in.readInt();
-            skip(valuesLength, in);
+            skip(in, valuesLength);
             bytesLeft -= (pointerSize * 2) + 8 + valuesLength;
             
             // TODO - improve thread access
@@ -797,10 +794,10 @@ public class HprofParser {
               if (ai == null) {
                 InstanceSummary tmp = instanceSummary.get(elemClassPointer);
                 if (tmp == null) {
-                  ai = new ArraySummary(unknown.className+"[]");
+                  ai = new ArraySummary(UNKNOWN_CLASS.className + "[]");
                   System.out.println("unknown class array:"+arrayPointer+":"+elemClassPointer);
                 } else {
-                  ai = new ArraySummary(tmp.className + "[]");
+                  ai = new ArraySummary(tmp.getFormattedName() + "[]");
                 }
                 arraySummary.put(elemClassPointer, ai);
               }

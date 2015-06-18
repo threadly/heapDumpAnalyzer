@@ -2,6 +2,8 @@ package org.threadly.heap.parser;
 
 import java.util.Arrays;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.threadly.util.ArgumentVerifier;
 
@@ -104,6 +106,8 @@ public abstract class DataStructures {
     public final long valuesFilePos;
     public final int valuesLength;
     private Instance[] parentReferences;
+    private final AtomicBoolean traversed;
+    private final AtomicInteger retainedSize; // data not in this instance, but retained by this instance
     
     public Instance(long instancePointer, 
                     ClassDefinition classDef, long valuesFilePos, int valuesLength) {
@@ -112,6 +116,8 @@ public abstract class DataStructures {
       this.valuesFilePos = valuesFilePos;
       this.valuesLength = valuesLength;
       parentReferences = new Instance[0];
+      traversed = new AtomicBoolean(false);
+      retainedSize = new AtomicInteger(0);
     }
 
     public void addParent(Instance parent) {
@@ -131,6 +137,14 @@ public abstract class DataStructures {
     
     public Instance[] getParentInstances() {
       return parentReferences;
+    }
+
+    public boolean traversed() {
+      return traversed.get() || ! traversed.compareAndSet(false, true);
+    }
+
+    public void trackRetainedSize(int retainedSize) {
+      this.retainedSize.addAndGet(retainedSize);
     }
   }
   
@@ -193,12 +207,29 @@ public abstract class DataStructures {
      */
     public abstract int getTotalBytesUsed();
     
+    public String getFormattedName() {
+      if (className.equals("[Ljava/lang/String;")) {
+        return "String";
+      } else if (className.equals("[Ljava/lang/Object;")) {
+        return "Object";
+      }
+      String result = className;
+      if (result.endsWith(";")) {
+        result = result.substring(0, result.length() - 1);
+      }
+      if (result.startsWith("[L")) {
+        result = result.substring(2);
+      }
+      return result;
+    }
+    
     @Override
     public String toString() {
-      return className + " - " + String.format("%.2f", getTotalBytesUsed() / 1024.) + "KB, " + 
-               instanceCount + " instances";
+      return getFormattedName() + " - " + String.format("%.2f", getTotalBytesUsed() / 1024.) + " KB, " + 
+               getInstanceCount() + " instances";
     }
   }
+  
   /**
    * <p>Class which is a summary for all array instances of a given class.</p>
    * 
@@ -228,7 +259,7 @@ public abstract class DataStructures {
     
     @Override
     public int getTotalBytesUsed() {
-      return totalSize;
+      return totalSize + (HprofParser.getPointerSize() * getInstanceCount());
     }
   }
   
@@ -241,17 +272,28 @@ public abstract class DataStructures {
   public static class InstanceSummary extends Summary {
     private final long classPointer;
     private final Map<Long, ClassDefinition> classMap;
+    private final AtomicInteger retainedData;
     
     public InstanceSummary(long classPointer, Map<Long, ClassDefinition> classMap, 
                            String className) {
       super(className);
       this.classPointer = classPointer;
       this.classMap = classMap;
+      retainedData = new AtomicInteger(0);
+    }
+    
+    @Override
+    public String toString() {
+      return super.toString() + ", retained: " + String.format("%.2f", retainedData.get() / 1024.) + " KB";
     }
     
     @Override
     public int getTotalBytesUsed() {
-      return getInstanceCount() * classMap.get(classPointer).instanceSize;
+      return getInstanceCount() * (classMap.get(classPointer).instanceSize + HprofParser.getPointerSize());
+    }
+
+    public void incrementRetained(int retainedSize) {
+      retainedData.addAndGet(retainedSize);
     }
   }
 }
