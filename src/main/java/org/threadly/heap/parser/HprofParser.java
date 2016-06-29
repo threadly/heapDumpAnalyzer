@@ -13,7 +13,7 @@ import java.util.Map;
 import java.util.concurrent.ExecutionException;
 
 import org.threadly.concurrent.SameThreadSubmitterExecutor;
-import org.threadly.concurrent.SubmitterExecutorInterface;
+import org.threadly.concurrent.SubmitterExecutor;
 import org.threadly.concurrent.future.FutureUtils;
 import org.threadly.concurrent.future.ListenableFuture;
 import org.threadly.heap.parser.DataStructures.ArraySummary;
@@ -46,7 +46,7 @@ public class HprofParser {
     return pointerSize;
   }
   
-  private final SubmitterExecutorInterface executor;
+  private final SubmitterExecutor executor;
   private final File hprofFile;
   private final List<ListenableFuture<?>> parsingFutures;
   private final Map<Long, ClassDefinition> classMap;
@@ -63,7 +63,7 @@ public class HprofParser {
    * @param executor Executor that computation can be threaded out to
    * @param hprofFile File that should be parsed
    */
-  public HprofParser(SubmitterExecutorInterface executor, File hprofFile) {
+  public HprofParser(SubmitterExecutor executor, File hprofFile) {
     ArgumentVerifier.assertNotNull(hprofFile, "hprofFile");
     if (! hprofFile.exists()) {
       throw new IllegalArgumentException("File does not exist: " + hprofFile);
