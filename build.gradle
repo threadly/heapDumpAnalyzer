@@ -1,4 +1,5 @@
 apply plugin: 'java'
+apply plugin: 'maven'
 
 repositories {
   mavenCentral()
@@ -21,7 +22,9 @@ compileTestJava {
 }
 
 test {
-  getReports().getJunitXml().setDestination(file("$buildDir/test-results/xml"))
+  getReports().getJunitXml().setDestination(file("$buildDir/reports/tests/xml"))
+  getReports().getHtml().setDestination(file("$buildDir/reports/tests/html"))
+  setBinResultsDir(file("$buildDir/reports/tests/bin"))
 }
 
 jar {
