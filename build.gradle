@@ -9,7 +9,7 @@ repositories {
 
 dependencies {
   testCompile group: 'junit', name: 'junit', version: '4.+'
-  compile group: 'org.threadly', name: 'threadly', version: '4.+'
+  compile group: 'org.threadly', name: 'threadly', version: '5.22'
 }
 
 compileJava {

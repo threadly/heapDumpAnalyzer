@@ -26,7 +26,6 @@ import org.threadly.heap.parser.DataStructures.Type;
 import org.threadly.heap.parser.DataStructures.Value;
 import org.threadly.util.ArgumentVerifier;
 import org.threadly.util.ExceptionUtils;
-import org.threadly.util.StringUtils;
 
 /**
  * <p>This class parses a binary format hprof heap dump file.  These files can be generated using 
@@ -120,7 +119,7 @@ public class HprofParser {
   }
   
   public void analyze() throws IOException {
-    System.out.println(StringUtils.NEW_LINE + "Done parsing file, now analyzing..." + StringUtils.NEW_LINE);
+    System.out.println("Done parsing file, now analyzing...");
     
     analyzeInstances();
     
